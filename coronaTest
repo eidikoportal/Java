@@ -1,0 +1,81 @@
+package test;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.Scanner;
+import java.util.TreeMap;
+
+public class test {
+
+	public static void main(String[] args) {
+		
+		  Scanner sc = new Scanner(System.in); 
+			System.out.println("Please enter the coronavirus samples");
+			String cor = sc.nextLine();
+			System.out.println("Please enter No of samples to test");
+			int n = sc.nextInt();
+			System.out.println("Please enter the samples to test");  
+			List<String> arr = new ArrayList<String>();
+			sc.nextLine(); 
+			if(n>=1 && n<=10){
+				for (int i = 0; i < n; i++)  
+        { 
+          String sam = sc.nextLine();
+          if(!sam.isEmpty()){
+            if(sam.length()>=1 && sam.length()<=cor.length() && cor.length()<=100000)
+              arr.add(sam.toLowerCase());
+          }
+
+        }
+        sc.close();
+        coronaTest(cor.toLowerCase(), n, arr);
+				
+			}
+			
+			
+		
+	}
+	
+	
+	public static void coronaTest(String cor, int n, List<String> arrP) {
+		String result = "NEGATIVE";
+		String res = "";
+		for (int i = 0; i < arrP.size(); i++) {
+			res = arrP.get(i)!=null?arrP.get(i):"";
+			List<Integer> arrI = new ArrayList<Integer>();
+			for (int j = 0; j < res.length(); j++) {
+				String c = res.substring(j, j + 1);
+				if (cor.contains(c)) {
+					if (j == 0) {
+						arrI.add(cor.indexOf(res.substring(j, j + 1)));
+					}
+					if (j > 0) {
+						int index1 = arrI.get(j - 1)!=null?arrI.get(j - 1):0;
+						arrI.add(cor.indexOf(res.substring(j, j + 1),
+								arrI.get(j - 1)!=null?arrI.get(j - 1):0));
+						int index = arrI.get(j)!=null?arrI.get(j):0;
+						if (index > index1) {
+							result = "POSITIVE";
+						} else {
+							result = "NEGATIVE";
+							break;
+						}
+
+					}
+				} else {
+					result = "NEGATIVE";
+					break;
+
+				}
+			}
+			if (!res.isEmpty()) {
+				System.out.println(result);
+			}
+
+		}
+
+	}
+	
+}
