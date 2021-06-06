@@ -1,0 +1,2 @@
+module PrototypePattern {
+}

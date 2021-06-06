@@ -1,0 +1,2 @@
+module AbractFactoryMethodPattern {
+}
