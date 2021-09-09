@@ -1,0 +1,428 @@
+package com.mcb.ldap;
+
+
+
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Hashtable;
+import java.util.List;
+import java.util.Map;
+import javax.naming.Context;
+import javax.naming.NamingEnumeration;
+import javax.naming.NamingException;
+import javax.naming.SizeLimitExceededException;
+import javax.naming.directory.Attributes;
+import javax.naming.directory.SearchControls;
+import javax.naming.directory.SearchResult;
+import javax.naming.ldap.InitialLdapContext;
+import javax.naming.ldap.LdapContext;
+import com.ibm.broker.javacompute.MbJavaComputeNode;
+import com.ibm.broker.plugin.MbElement;
+import com.ibm.broker.plugin.MbException;
+import com.ibm.broker.plugin.MbJSON;
+import com.ibm.broker.plugin.MbMessage;
+import com.ibm.broker.plugin.MbMessageAssembly;
+import com.ibm.broker.plugin.MbOutputTerminal;
+import com.ibm.broker.plugin.MbUserException;
+import com.ibm.broker.plugin.MbXPath;
+import java.lang.management.ManagementFactory;
+import java.sql.Timestamp;
+
+public class GetUserList_getUserListFromActiveDir extends MbJavaComputeNode {
+private static Map<String,String> userDef = new HashMap<>();
+private static int userCount=0;
+public void evaluate(MbMessageAssembly inAssembly) throws MbException {
+MbOutputTerminal out = getOutputTerminal("out");
+MbOutputTerminal alt = getOutputTerminal("alternate");
+MbMessage inMessage = inAssembly.getMessage();
+MbMessageAssembly outAssembly = null;
+// create new message as a copy of the input
+MbMessage outMessage = new MbMessage(inMessage);
+outAssembly = new MbMessageAssembly(inAssembly, outMessage);
+MbMessage globalEnvMsg = outAssembly.getGlobalEnvironment();
+copyMessageHeaders(inMessage, globalEnvMsg);
+outMessage.getRootElement().getLastChild().delete();
+MbElement root=outMessage.getRootElement().createElementAsLastChild(MbJSON.PARSER_NAME);
+MbElement jsonRoot=root.createElementAsLastChild(MbJSON.OBJECT,MbJSON.DATA_ELEMENT_NAME,null);
+MbElement msgRoot = inMessage.getRootElement();
+String channel =getMqrfh(msgRoot,"Channel");
+String method =getMqrfh(msgRoot,"Method");
+String msgId =getMqrfh(msgRoot,"ESB_CorrelId");
+String replyProtocol =getMqrfh(msgRoot,"ESB_ReplyProtocol");
+//String msgId = inMessage.getRootElement().getFirstElementByPath("MQRFH2/usr/ESB_CorrelId").getValueAsString();
+Timestamp timeStmp= new Timestamp(System.currentTimeMillis());
+SimpleDateFormat formatDate = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+String requestTime = inMessage.getRootElement().getFirstElementByPath("Properties/CreationTime")!=null?
+inMessage.getRootElement().getFirstElementByPath("Properties/CreationTime").getValueAsString():formatDate.format(timeStmp);
+/*
+* LogMsg is used for logging data.
+*/
+logMsg(replyProtocol,method,jsonRoot,"InputMsg",msgId,requestTime,userDef.get("Info"),channel,userDef.get("WebService"),userDef.get("AppIdentifier"),inMessage);
+alt.propagate(outAssembly);
+MbElement req = inMessage.getRootElement().getFirstElementByPath("JSON/Data/Get_User_In_Group_V1_Req");
+String type="";
+String groupName="";
+if(req!=null){
+type=req.getFirstElementByPath("Type")!=null?req.getFirstElementByPath("Type").getValueAsString():"";
+groupName=req.getFirstElementByPath("Group_Name")!=null?req.getFirstElementByPath("Group_Name").getValueAsString():"";
+}
+Hashtable<Object,Object> env = new Hashtable<>();
+List<String> groupData=new ArrayList<>();
+LdapContext ldapCtxt=null;
+try {
+// ----------------------------------------------------------
+// Add user code below
+env.put(Context.INITIAL_CONTEXT_FACTORY,userDef.get("Factory"));
+env.put(Context.SECURITY_AUTHENTICATION, userDef.get("Auth"));
+env.put(Context.PROVIDER_URL, userDef.get("Host"));
+env.put(Context.SECURITY_PRINCIPAL,userDef.get("User")+","+userDef.get("SearchBase"));
+env.put(Context.SECURITY_CREDENTIALS, userDef.get("Pass"));
+ldapCtxt = new InitialLdapContext(env,null);
+String[] attrIDs = { getOrigAttr(type),"member" };
+/*
+* log request parameter to search in active directory
+*/
+outMessage.getRootElement().getFirstElementByPath("JSON/Data/DBLogging").delete();
+logMsg(replyProtocol,method,jsonRoot,"BuildADReq",msgId,requestTime,userDef.get("Info"),channel,userDef.get("WebService")
+,userDef.get("AppIdentifier"),"Group="+groupName+",SearchAttribute="+type);
+alt.propagate(outAssembly);
+//check if group is present in common name with limit 1
+MbElement status = jsonRoot.createElementAsLastChild(MbJSON.OBJECT,"ResponseStatus",null);
+groupData = getMembers(1,ldapCtxt,attrIDs,userDef.get("UserPrefix"),groupName);
+outMessage.getRootElement().getFirstElementByPath("JSON/Data/DBLogging").delete();
+outMessage.getRootElement().getFirstElementByPath("JSON/Data/ResponseStatus").delete();
+/*
+* log response from active directory
+*/
+logMsg(replyProtocol,method,jsonRoot,"ADResp",msgId,requestTime,userDef.get("Info"),channel,userDef.get("WebService"),userDef.get("AppIdentifier"),groupData.toString());
+alt.propagate(outAssembly);
+/*
+* Build Response if attribute is found for given common name else group not found.
+*/
+status = jsonRoot.createElementAsLastChild(MbJSON.OBJECT,"ResponseStatus",null);
+if(!groupData.isEmpty()){
+getUserAtrrAndBuildResp(10,ldapCtxt,attrIDs,status,jsonRoot,type,groupData,userDef.get("SearchBase"));
+}
+else{
+status.createElementAsLastChild(MbElement.TYPE_NAME_VALUE,"ReturnCode","-1");
+status.createElementAsLastChild(MbElement.TYPE_NAME_VALUE,"ErrorMsg","Group Not Found");
+}
+outMessage.getRootElement().getFirstElementByPath("JSON/Data/DBLogging").delete();
+/*
+* log output messsage from active directory
+*/
+String outMsgString = new String(outMessage.getRootElement().getLastChild().toBitstream(null, null, null, 546, 1208, 0));
+logMsg(replyProtocol,method,jsonRoot,"OutputMsg",msgId,requestTime,userDef.get("Info"),channel,userDef.get("WebService"),userDef.get("AppIdentifier"),outMsgString);
+MbMessageAssembly msgAssembly = null;
+// create new message as a copy of the input
+MbMessage msgMessage = new MbMessage(outMessage);
+msgAssembly = new MbMessageAssembly(outAssembly, msgMessage);
+if(msgMessage.getRootElement().getFirstElementByPath("JSON/Data/ResponseStatus")!=null)
+msgMessage.getRootElement().getFirstElementByPath("JSON/Data/ResponseStatus").delete();
+if(msgMessage.getRootElement().getFirstElementByPath("JSON/Data/ResponseData")!=null)
+msgMessage.getRootElement().getFirstElementByPath("JSON/Data/ResponseData").delete();
+if(outMessage.getRootElement().getFirstElementByPath("JSON/Data/DBLogging")!=null)
+outMessage.getRootElement().getFirstElementByPath("JSON/Data/DBLogging").delete();
+alt.propagate(msgAssembly);
+// End of user code
+// ----------------------------------------------------------
+}
+catch (SizeLimitExceededException e) {
+MbElement code=jsonRoot.getFirstElementByPath("ResponseData/Exception/Code");
+MbElement msg =jsonRoot.getFirstElementByPath("ResponseData/Exception/Msg");
+if(code!=null){
+code.setValue("-1");
+}else{
+jsonRoot.createElementAsLastChild(MbJSON.OBJECT,"ResponseData",null)
+.createElementAsLastChild(MbJSON.OBJECT,"Exception",null).createElementAsLastChild(MbElement.TYPE_NAME_VALUE,"Code","-1");
+}
+if(msg!=null){
+msg.setValue("Size Limit Exceeded(MAX_LIMIT="+userCount+")");
+}else{
+jsonRoot.createElementAsLastChild(MbJSON.OBJECT,"ResponseData",null)
+.createElementAsLastChild(MbJSON.OBJECT,"Exception",null).createElementAsLastChild(MbElement.TYPE_NAME_VALUE,"Msg","Size Limit Exceeded(MAX_LIMIT="+userCount+")");
+}
+outMessage.getRootElement().getFirstElementByPath("JSON/Data/DBLogging").delete();
+String outMsgString = new String(outMessage.getRootElement().getLastChild().toBitstream(null, null, null, 546, 1208, 0));
+logMsg(replyProtocol,method,jsonRoot,"OutputMsg",msgId,requestTime,userDef.get("Error"),channel,userDef.get("WebService"),userDef.get("AppIdentifier"),outMsgString);
+MbMessageAssembly msgAssembly = null;
+// create new message as a copy of the input
+MbMessage msgMessage = new MbMessage(outMessage);
+msgAssembly = new MbMessageAssembly(outAssembly, msgMessage);
+if(msgMessage.getRootElement().getFirstElementByPath("JSON/Data/ResponseStatus")!=null)
+msgMessage.getRootElement().getFirstElementByPath("JSON/Data/ResponseStatus").delete();
+if(msgMessage.getRootElement().getFirstElementByPath("JSON/Data/ResponseData")!=null)
+msgMessage.getRootElement().getFirstElementByPath("JSON/Data/ResponseData").delete();
+if(outMessage.getRootElement().getFirstElementByPath("JSON/Data/DBLogging")!=null)
+outMessage.getRootElement().getFirstElementByPath("JSON/Data/DBLogging").delete();
+alt.propagate(msgAssembly);
+}catch (MbException e) {
+// Re-throw to allow Broker handling of MbException
+throw e;
+} catch (RuntimeException e) {
+// Re-throw to allow Broker handling of RuntimeException
+throw e;
+} catch (Exception e) {
+// Consider replacing Exception with type(s) thrown by user code
+// Example handling ensures all exceptions are re-thrown to be handled in the flow
+throw new MbUserException(this, "evaluate()", "", "", e.toString(),
+null);
+}
+finally{
+try {
+if(ldapCtxt!=null)
+ldapCtxt.close();
+} catch (NamingException e) {
+// TODO Auto-generated catch block
+throw new MbUserException(this, "evaluate()", "", "", e.toString(),
+null);
+}
+}
+// The following should only be changed
+// if not propagating message to the 'out' terminal
+//reset count before propagating to out terminal.
+userCount=0;
+out.propagate(outAssembly);
+
+}
+
+/**
+* onPreSetupValidation() is called during the construction of the node
+* to allow the node configuration to be validated.  Updating the node
+* configuration or connecting to external resources should be avoided.
+*
+* @throws MbException
+*/
+@Override
+public void onPreSetupValidation() throws MbException {
+}
+
+/**
+* onSetup() is called during the start of the message flow allowing
+* configuration to be read/cached, and endpoints to be registered.
+*
+* Calling getPolicy() within this method to retrieve a policy links this
+* node to the policy. If the policy is subsequently redeployed the message
+* flow will be torn down and reinitialized to it's state prior to the policy
+* redeploy.
+*
+* @throws MbException
+*/
+@Override
+public void onSetup() throws MbException {
+userDef.put("Host", getUserDefinedAttribute("HOST")!=null?(String) getUserDefinedAttribute("HOST"):"");
+userDef.put("Port", getUserDefinedAttribute("PORT")!=null?(String) getUserDefinedAttribute("PORT"):"");
+userDef.put("User", getUserDefinedAttribute("USER")!=null?(String) getUserDefinedAttribute("USER"):"");
+userDef.put("Pass", getUserDefinedAttribute("PASS")!=null?(String) getUserDefinedAttribute("PASS"):"");
+userDef.put("Factory", getUserDefinedAttribute("FACTORY")!=null?(String) getUserDefinedAttribute("FACTORY"):"");
+userDef.put("Auth", getUserDefinedAttribute("AUTH")!=null?(String) getUserDefinedAttribute("AUTH"):"");
+userDef.put("SearchUserFilter", getUserDefinedAttribute("SEARCH_USER_FILTER")!=null?(String) getUserDefinedAttribute("SEARCH_USER_FILTER"):"");
+userDef.put("UserPrefix", getUserDefinedAttribute("USER_PREFIX")!=null?(String) getUserDefinedAttribute("USER_PREFIX"):"");
+userDef.put("GroupPrefix", getUserDefinedAttribute("GROUP_PREFIX")!=null?(String) getUserDefinedAttribute("GROUP_PREFIX"):"");
+userDef.put("SearchBase", getUserDefinedAttribute("SEARCH_BASE")!=null?(String) getUserDefinedAttribute("SEARCH_BASE"):"");
+userDef.put("Error", getUserDefinedAttribute("ERROR")!=null?(String) getUserDefinedAttribute("ERROR"):"");
+userDef.put("Info", getUserDefinedAttribute("INFO")!=null?(String) getUserDefinedAttribute("INFO"):"");
+userDef.put("WebService", getUserDefinedAttribute("WEB_SERVICE")!=null?(String) getUserDefinedAttribute("WEB_SERVICE"):"");
+userDef.put("AppIdentifier", getUserDefinedAttribute("APPLICATION_IDENTIFIER")!=null?(String) getUserDefinedAttribute("APPLICATION_IDENTIFIER"):"");
+}
+
+/**
+* onStart() is called as the message flow is started. The thread pool for
+* the message flow is running when this method is invoked.
+*
+* @throws MbException
+*/
+@Override
+public void onStart() throws MbException {
+}
+
+/**
+* onStop() is called as the message flow is stopped. 
+*
+* The onStop method is called twice as a message flow is stopped. Initially
+* with a 'wait' value of false and subsequently with a 'wait' value of true.
+* Blocking operations should be avoided during the initial call. All thread
+* pools and external connections should be stopped by the completion of the
+* second call.
+*
+* @throws MbException
+*/
+@Override
+public void onStop(boolean wait) throws MbException {
+}
+
+/**
+* onTearDown() is called to allow any cached data to be released and any
+* endpoints to be deregistered.
+*
+* @throws MbException
+*/
+@Override
+public void onTearDown() throws MbException {
+}
+/**
+* copy header
+*/
+public void copyMessageHeaders(MbMessage inMessage, MbMessage outMessage) throws MbException
+{
+MbElement outRoot = outMessage.getRootElement();
+MbElement header = inMessage.getRootElement().getFirstChild();
+
+while(header != null && header.getNextSibling() != null)
+{
+outRoot.addAsLastChild(header.copy());
+header = header.getNextSibling();
+}
+}
+/**
+* Build Log Message in JSON Format
+* @throws MbException 
+*/
+public static void logMsg(String replyProtocol,String method,MbElement root,String compName,String id,String time,String level,String channel,String service,String appIdentifier,Object inMsg) throws MbException{
+MbElement data = root.createElementAsLastChild(MbJSON.OBJECT,"DBLogging",null);
+data.createElementAsLastChild(MbElement.TYPE_NAME_VALUE,"Requestor_Channel",channel);
+data.createElementAsLastChild(MbElement.TYPE_NAME_VALUE,"Requestor_Method",method);
+data.createElementAsLastChild(MbElement.TYPE_NAME_VALUE,"Channel",replyProtocol);
+data.createElementAsLastChild(MbElement.TYPE_NAME_VALUE,"Method",method);
+data.createElementAsLastChild(MbElement.TYPE_NAME_VALUE,"CorrelationId",id);
+String process = !(ManagementFactory.getRuntimeMXBean().getName().isEmpty())?ManagementFactory.getRuntimeMXBean().getName():"0@";
+data.createElementAsLastChild(MbElement.TYPE_NAME_VALUE,"ProcessID",process.substring(0, process.indexOf("@")));
+Timestamp timeStmp= new Timestamp(System.currentTimeMillis());
+SimpleDateFormat formatDate = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+data.createElementAsLastChild(MbElement.TYPE_NAME_VALUE,"DateTime",formatDate.format(timeStmp));
+data.createElementAsLastChild(MbElement.TYPE_NAME_VALUE,"RequestTime",time!=null && (!time.isEmpty())?time:formatDate.format(timeStmp));
+data.createElementAsLastChild(MbElement.TYPE_NAME_VALUE,"LogType",level);
+data.createElementAsLastChild(MbElement.TYPE_NAME_VALUE,"ApplicationName",service);
+data.createElementAsLastChild(MbElement.TYPE_NAME_VALUE,"FunctionName",appIdentifier);
+data.createElementAsLastChild(MbElement.TYPE_NAME_VALUE,"ComponentName",compName);
+if(inMsg instanceof MbMessage){
+data.createElementAsLastChild(MbElement.TYPE_NAME_VALUE,"Message",new String(((MbMessage) inMsg).getRootElement().getLastChild().toBitstream(null, null, null, 546, 1208, 0)));
+}
+if(inMsg instanceof String){
+data.createElementAsLastChild(MbElement.TYPE_NAME_VALUE,"Message",(String)inMsg);
+}
+}
+public static String getMqrfh(MbElement msgRoot,String key) throws MbException{
+MbXPath xp = new MbXPath("/MQRFH2/usr/"+key,msgRoot);
+String val="";
+List rfh2list = (List)msgRoot.evaluateXPath(xp);
+if(rfh2list.isEmpty() || rfh2list == null){
+return val;
+}
+MbElement rfh2elem = (MbElement) rfh2list.get(0);
+//String rfhTagName = rfh2elem.getName();
+Object tagObjVal = rfh2elem.getValue();
+if(tagObjVal instanceof String){
+val = (String)rfh2elem.getValue();
+}
+return val;
+}
+/**
+* get list of  members in the group if exists or else return empty list
+* 
+*/
+public static List<String> getMembers(int limit,LdapContext ldapCtxt,String[] attrIDs,String perfix,String groupName){
+List<String> memberList = new ArrayList<>();
+try {
+StringBuffer sb = new StringBuffer(perfix);
+String searchGroup = sb.append(groupName).toString();
+NamingEnumeration<SearchResult> resGroup = searchDir(1,ldapCtxt,attrIDs,searchGroup,userDef.get("SearchBase"));
+while (resGroup!=null && resGroup.hasMore()) {
+SearchResult rslt = resGroup.next();
+Attributes attrs = rslt.getAttributes();
+String mem = attrs.get("member")!=null?attrs.get("member").toString():userDef.get("SearchBase");
+String[] memberArr = mem.split(userDef.get("SearchBase"));
+int i = 0;
+while(memberArr!=null && i < memberArr.length ){
+String cn = memberArr[i]!=null ? memberArr[i]:"";
+if(cn.contains(":")){
+cn = cn.substring(cn.indexOf(":")+1);
+}
+if(cn.startsWith(",")){
+cn = cn.substring(cn.indexOf(",")+1);
+}
+if(cn.contains("CN") || cn.contains("cn")){
+memberList.add(cn.trim());
+}
+i++;
+}
+}
+} catch (NamingException e) {
+e.printStackTrace();
+}
+return memberList;
+}
+/**
+* getUserAtrrAndBuildResp is called to get user attribute(based on front end request parameter Type) and build JSON Response.
+* @throws MbException 
+* 
+*/
+public static void getUserAtrrAndBuildResp(int limit,LdapContext ldapCtxt,String[] attrIDs,MbElement status,MbElement jsonRoot,String type,List<String> mem,String path) throws SizeLimitExceededException,MbException,NamingException{
+status.createElementAsLastChild(MbElement.TYPE_NAME_VALUE,"ReturnCode","0");
+status.createElementAsLastChild(MbElement.TYPE_NAME_VALUE,"ErrorMsg"," ");
+MbElement data = jsonRoot.createElementAsLastChild(MbJSON.OBJECT,"ResponseData",null);
+MbElement excep = data.createElementAsLastChild(MbJSON.OBJECT,"Exception",null);
+excep.createElementAsLastChild(MbElement.TYPE_NAME_VALUE,"Code","0");
+excep.createElementAsLastChild(MbElement.TYPE_NAME_VALUE,"Msg"," ");
+MbElement resp = data.createElementAsLastChild(MbJSON.OBJECT,"Get_User_In_Group_V1_Resp",null);
+MbElement userList = resp.createElementAsLastChild(MbJSON.ARRAY,"Users",null);
+for(int i=0;i<mem.size();i++){
+String member = mem.get(i)!=null?mem.get(i):"";
+NamingEnumeration<SearchResult> resUser = searchDir(limit,ldapCtxt,attrIDs,userDef.get("SearchUserFilter"),member+path);
+while (resUser.hasMore()) {
+SearchResult rslt = resUser.next();
+Attributes attrs = rslt.getAttributes();
+String attr = attrs.get(getOrigAttr(type))!=null?attrs.get(getOrigAttr(type)).toString().trim():":";
+String dat[] = !(attr.isEmpty())?attr.split(":"):null;
+String attrVal = dat!=null?dat[1].trim():"";
+MbElement jsonArr = userList.createElementAsLastChild(MbElement.TYPE_NAME,MbJSON.ARRAY_ITEM_NAME,null);
+jsonArr.createElementAsLastChild(MbElement.TYPE_NAME_VALUE,"Value",attrVal);
+userCount++;
+}
+}
+resp.getLastChild().createElementBefore(MbElement.TYPE_NAME_VALUE,"RecordCount",Integer.toString(userCount));
+}
+/**
+* searchDir is called to groups and users from Active Directory with limit.
+* 
+*/
+public static NamingEnumeration<SearchResult> searchDir(int limit,LdapContext ldapCtxt,String[] attrIDs,String filter,String path){
+SearchControls ctlsUser = new SearchControls();
+ctlsUser.setReturningAttributes(attrIDs);
+ctlsUser.setSearchScope(ctlsUser.SUBTREE_SCOPE);
+ctlsUser.setTimeLimit(10000);
+NamingEnumeration<SearchResult> answer=null;
+try {
+//ldapCtxt.setRequestControls(new Control[]{new PagedResultsControl(limit, Control.CRITICAL)});
+answer = ldapCtxt.search(path,filter, ctlsUser);
+} catch (NamingException e) {
+e.printStackTrace();
+}
+return answer;
+}
+/**
+* getOrigAttr is called to get actual attribute based on request attribute type. 
+* 
+*/
+public static String getOrigAttr(String type){
+String typeVal="sAMAccountName";
+switch(type){
+case "ALIAS":
+typeVal= "sAMAccountName";
+break;
+case "FULL_NAME":
+typeVal= "name";
+break;
+case "EMAIL":
+typeVal= "mail";
+break;
+case "INTERNAL_EMAIL":
+typeVal= "userPrincipalName";
+break;
+default:
+typeVal= "sAMAccountName";
+}
+return typeVal;
+}
+}
